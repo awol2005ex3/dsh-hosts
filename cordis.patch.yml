@@ -1,0 +1,15 @@
+# dsh-host-mcp 的 bundle 层 patch：把 Node 半插件注册进配置树。
+#
+# Node 半：loader.import('dsh-host-mcp') 解析到 lib/index.js，
+#   - 读插件配置（servers 列表：host + port + token，volatile 字段可热改）；
+#   - 注册 /api/host-mcp/* 精确 Fetch 路由（connection.fetch.register）；
+#   - 注册 host-mcp agent 工具（ctx.tools.register）。
+#
+# 浏览器半：client-modules 扫描到本包的 dsh.client 声明后，经
+# /plugins/dsh-host-mcp/client.js 提供 lib/client.js，浏览器 shell 为同一行名
+# 创建 fiber 并物化客户端模块，挂载「服务器配置 + 运维面板」。
+#
+# 注意：patch 按 id 整体替换 config，不会深合并。改本文件请保留整行。
+- insert:
+    - id: host-mcp
+      name: dsh-host-mcp
