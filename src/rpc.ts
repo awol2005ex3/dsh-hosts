@@ -45,6 +45,7 @@ export const RPC_ENDPOINTS = [
   'count_file_lines',
   'read_file_lines',
   'exec_script',
+  'server_info',
   'diagnose',
   'probe_uncached',
 ] as const
@@ -102,6 +103,17 @@ function pickServer(
   return { server }
 }
 
+/** 从 error 路径的结构化 JSON 文本里取出 error_kind（成功路径的 text 是普通结果 JSON，无此字段）。 */
+function extractErrorKind(result: McpCallResult): string | undefined {
+  if (result.isError !== true || typeof result.text !== 'string') return undefined
+  try {
+    const parsed = JSON.parse(result.text) as { error_kind?: unknown }
+    return typeof parsed.error_kind === 'string' ? parsed.error_kind : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** 把 MCP 调用结果折叠成 RpcResult。 */
 function mcpToRpc(result: McpCallResult): RpcResult {
   if (!result.ok) {
@@ -117,7 +129,14 @@ function mcpToRpc(result: McpCallResult): RpcResult {
       },
     }
   }
-  return ok({ isError: result.isError === true, text: result.text ?? '' })
+  // 服务端 exec_script 在 isError=true 时会把 text 写成结构化 JSON
+  // {is_error, error_kind, message}（error_kind 由 classify_error 归类），
+  // 这里把 error_kind 提到兄弟字段，方便 agent 工具与浏览器面板直接解读。
+  return ok({
+    isError: result.isError === true,
+    text: result.text ?? '',
+    ...(extractErrorKind(result) !== undefined ? { errorKind: extractErrorKind(result) } : {}),
+  })
 }
 
 /** 对某台服务器做连通性诊断（health + initialize + whoami），返回结构化报告。 */
@@ -258,7 +277,8 @@ function createHandler(settingsRef: () => HostMcpSettings & { serverError?: stri
       case 'list_files':
       case 'count_file_lines':
       case 'read_file_lines':
-      case 'exec_script': {
+      case 'exec_script':
+      case 'server_info': {
         const picked = pickServer(settings, args, true)
         if (picked.error || !picked.server) return failure(new Error(picked.error ?? '无服务器'))
         const toolArgs = { ...args }

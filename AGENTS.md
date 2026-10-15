@@ -15,7 +15,7 @@
 | `src/index.ts` | 宿主半入口：`name` / `inject` / `Config` / `apply`。注册 `/api/host-mcp/*` 精确路由 + `host-mcp` 工具 |
 | `src/settings.ts` | **配置载体**：`HostMcpConfigSchema`（servers JSON + 5 个标量，全 `.volatile()`）、`readSettings()` 现读解包、`parseServers()` 容错解析、`serverUrl()` |
 | `src/mcp-client.ts` | MCP Streamable HTTP 客户端：`initSession` / `callTool` / `healthCheck` / `invalidateSession`。SSE 帧解析、会话缓存、422 重初始化、401 可读报错 |
-| `src/rpc.ts` | `RPC_ENDPOINTS`（11 个）、`createHandler`（端点→处理器）、`createDispatch`（工具与路由共用）、`registerRpcRoutes`（精确路由 + disposer） |
+| `src/rpc.ts` | `RPC_ENDPOINTS`（12 个：version/servers/probe/health/whoami/list_files/count_file_lines/read_file_lines/exec_script/server_info/diagnose/probe_uncached）、`createHandler`（端点→处理器）、`createDispatch`（工具与路由共用）、`registerRpcRoutes`（精确路由 + disposer）、`mcpToRpc`（MCP 结果→RpcResult，并把 exec_script 失败的结构化 `error_kind` 提到兄弟字段） |
 | `src/tool.ts` | `createHostMcpTool`：万能 `host-mcp` 工具（action + args + server） |
 | `src/client.ts` | 浏览器半：`buildConfigPanel`（服务器编辑器）、`buildOpsPanel`（概览/文件/执行）、`configChannel`（configForms）、`apply`（槽位注册） |
 | `scripts/wrap-client.mjs` | 把 `lib/client.js` 包成模块工厂（**幂等**：先剥旧包装再包，重复运行不叠层） |
@@ -34,10 +34,11 @@
 5. **`registerRpcRoutes` 内部提取 `connection.fetch`**。宿主 connection 是 `HostConnectionHandle`（注册器在 `.fetch.register`），测试替身可能直接给 `register`——两种形态都要兼容。
 6. **token 永不进 RPC 回包**。`servers` 端点只回 `hasToken`；浏览器编辑走官方 `configForms`，不需要经 RPC 回传 token。
 7. **`read_file_lines` 是唯一返回原始文本的工具**（其余走 `json_result` JSON 信封）。面板的 `toolData()` 助手按此分流。
-8. **MCP 会话**：`initialize` 无需会话头（它会签发 `Mcp-Session-Id`）；非 initialize 方法无会话头 → 422。客户端据此做「丢弃会话重试一次」。
-9. **浏览器半读 `configForms` 必须走 `ctx.inject(['configForms'], cb)`**（见下面第 3 条坑）。
-10. **浏览器不能直连 host_server_mcp 做预检**。dsh 页面与目标服务器跨源，而 host_server_mcp 不返回 CORS 头，浏览器 `fetch` 一律以 `Failed to fetch` 拒绝——与服务端是否可达无关（用户手动开标签页能通，因为那不是脚本发起的跨源请求）。配置页「测试连接」走宿主半的 `probe_uncached` 端点，宿主进程发 HTTP 无同源限制。
-11. **defaultServer 写规范 id（`deriveServerId` 横线形态），且宿主半按三档容错解析**（精确 id → 冒号形态重算 → 第一台）。两侧 `deriveServerId` 是手抄镜像，改一侧同步另一侧。
+8. **exec_script 失败走结构化错误**：服务端 `isError=true` 时 `text` 是 `{is_error, error_kind, message}` JSON（`error_kind` 由 `classify_error` 归类，含 interpreter_not_allowed/unsupported/not_found、blocked、path_denied/not_found、cwd_not_found、missing_cwd、exec_disabled、invalid_request、exec_failed）。宿主半 `mcpToRpc` 把 `error_kind` 提到回包兄弟字段 `errorKind`，工具与浏览器面板据此给出可读提示；`server_info`（需 exec 作用域）返回 `{os, default_interpreter, allowed_interpreters, available_interpreters[]}`，执行前可先探测环境选解释器。
+9. **MCP 会话**：`initialize` 无需会话头（它会签发 `Mcp-Session-Id`）；非 initialize 方法无会话头 → 422。客户端据此做「丢弃会话重试一次」。
+10. **浏览器半读 `configForms` 必须走 `ctx.inject(['configForms'], cb)`**（见下面第 3 条坑）。
+11. **浏览器不能直连 host_server_mcp 做预检**。dsh 页面与目标服务器跨源，而 host_server_mcp 不返回 CORS 头，浏览器 `fetch` 一律以 `Failed to fetch` 拒绝——与服务端是否可达无关（用户手动开标签页能通，因为那不是脚本发起的跨源请求）。配置页「测试连接」走宿主半的 `probe_uncached` 端点，宿主进程发 HTTP 无同源限制。
+12. **defaultServer 写规范 id（`deriveServerId` 横线形态），且宿主半按三档容错解析**（精确 id → 冒号形态重算 → 第一台）。两侧 `deriveServerId` 是手抄镜像，改一侧同步另一侧。
 
 ## 踩过的坑（2026-10-14）
 
@@ -46,13 +47,13 @@
 - **defaultServer 冒号/横线形态不一致**：面板旧代码写 `host:port`，而 `parseServers` 推导的 id 是横线形态（`:` 被折叠成 `-`），导致「默认服务器」落空、agent 报「服务器未配置」。已统一为 `deriveServerId` 规范形态 + `resolveDefaultId` 三档容错（能直接读旧数据，无需重存）。
 - **配置页「测试连接」报 `Failed to fetch` ≠ 服务器不通**。原因如上第 10 条：浏览器跨源被 CORS 拦。改走宿主半 RPC 后能正确区分「网络不通 / HTTP 非 200 / token 无效 / 作用域缺失」并给出对应提示。
 
-- **`ctx.get()` 跨 fiber 读不到服务——cordis 4 isolate 语义**（用户报「配置服务不可用（宿主未提供 configForms.host-mcp）」的根因）。`ctx.get(name)` 内部是 `this.ctx[symbols.isolate][name]` 取 key，而 `provide` 时 key 写在**提供者 fiber** 的 isolate map 里；兄弟 fiber 的 map 里没有这个 key，于是 `_getImpl` 返回 undefined。已用真 cordis 实测复现（`scripts/check-cordis-get.mjs` 的反面对照）。**唯一正规通道是 `ctx.inject([name], cb)`**——它创建子 fiber、等依赖就绪后跑回调。dsh-hdfs 用 `ctx.get` 读 configForms 其实同样不成立，它的「每次重新探测」方案在 cordis 4.0.4 下并不真正有效。
+- **`ctx.get()` 跨 fiber 读不到服务——cordis 4 isolate 语义**（用户报「配置服务不可用（宿主未提供 configForms.host-mcp）」的根因）。`ctx.get(name)` 内部是 `this.ctx[symbols.isolate][name]` 取 key，而 `provide` 时 key 写在**提供者 fiber** 的 isolate map 里；兄弟 fiber 的 map 里没有这个 key，于是 `_getImpl` 返回 undefined。已用真 cordis 实测复现（`scripts/check-cordis-get.mjs` 的反面对照）。**唯一正规通道是 `ctx.inject([name], cb)`**——它创建子 fiber、等依赖就绪后跑回调。。
 - **`configForms.describe()` 镜像异步拉取**：启动瞬间 `view.namespaces` 是空的，拿它做读写前置门控会误报「宿主配置镜像未包含 host-mcp」。权威判定是表单控制器自己的 status（缺席 → `unavailable`）。读配置只等 `ready`，失败重试至多 3 次。
 - **`ctx.inject` 的依赖方要先于提供者注册**：提供者已存在时 inject 回调不会补跑（cordis 既有语义）。所以配置页注册放在 apply 里尽早做，而不是等用户点开设置页。
 - **`/plugins/<id>/client.js` 必须带 `?rev=<hash>`** 才返回 200；rev 由 client.js 的 mtime/ctime/size 算出，探测时别忘。
 - **profile 的 node_modules 用 pnpm hoisted，未必包含 `@deepseek-ai/dsh-tools`**。插件必须自带依赖（`npm install`），不能靠指向别的插件 node_modules 的 junction。
 - **YAML patch 按 id 整体替换 config，不深合并**。插件自带的 `cordis.patch.yml` 与 profile patch 同时 insert 同一 id 是幂等的（dump 显示 `disabled: false`）。
-- `dsh --profile web --dump-config` 是验证插件条目是否进组合树的最快手段；`entry "xxx" not found` 告警对「只在 profile 层用 id 定向」的条目（hdfs/wecom/cas）是常态。
+- `dsh --profile web --dump-config` 是验证插件条目是否进组合树的最快手段；
 
 ## 常见改动点
 

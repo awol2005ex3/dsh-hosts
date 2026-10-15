@@ -1,7 +1,7 @@
 /**
  * 把 tsc 产出的 lib/client.js 包成浏览器模块工厂。
  *
- * 契约（同 dsh-hdfs/scripts/wrap-client.mjs）：client-modules 经
+ * 契约：client-modules 经
  * /plugins/<id>/client.js 取到本文件后，用 `window.__ModuleLoader__.load`
  * 执行；工厂返回 `module.exports`（{ name, inject, apply }）。
  *

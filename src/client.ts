@@ -1,7 +1,7 @@
 /**
  * dsh-host-mcp · 浏览器端 bundle 模块体。
  *
- * 构建契约同 dsh-hdfs/src/client.ts：本文件经 tsc 编译后，由
+ * 文件经 tsc 编译后，由
  * scripts/wrap-client.mjs 包上闭包工厂外壳（无 ESM 语法，module.exports 返回
  * { name, inject, apply }）。因此本文件不得出现 import/export 语句。
  *
@@ -81,7 +81,7 @@ interface RpcResponse {
  * 调一个宿主半端点。
  *
  * ⚠ 载荷必须包一层 `{ args }`：宿主半读 `envelope.payload.args`
- * （见 src/rpc.ts），与 dsh-hdfs 的约定一致。直接发扁平对象会让所有参数
+ * （见 src/rpc.ts）。直接发扁平对象会让所有参数
  * 静默丢失（表现为「未填主机名」这类看似无关的报错）。
  */
 async function callRpc(conn: any, endpoint: string, args?: Record<string, unknown>): Promise<any> {
@@ -108,6 +108,27 @@ function toolData(value: any): any {
   } catch {
     return { raw: value.text, isError: value.isError === true }
   }
+}
+
+/**
+ * server_info / exec_script 失败路径的结构化 error_kind → 可读提示
+ * （对应 host_server_mcp 的 classify_error）。
+ */
+function errorKindHint(kind: unknown): string | undefined {
+  const map: Record<string, string> = {
+    interpreter_not_allowed: '解释器不在白名单内（检查服务端 allowed_interpreters）',
+    interpreter_unsupported: '服务端不支持该解释器（内置：powershell/pwsh/cmd/bash/sh/python/python3/node）',
+    interpreter_not_found: '系统未安装该解释器或不在 PATH 中',
+    blocked: '脚本命中危险命令/交互式命令黑名单，被拒绝',
+    path_denied: '路径越权：不在该 token 的沙箱根目录内',
+    path_not_found: '路径不存在或不可访问',
+    cwd_not_found: '工作目录不存在',
+    missing_cwd: '未指定 cwd 且服务端未配置 exec.default_cwd',
+    exec_disabled: '服务端已禁用脚本执行',
+    invalid_request: '脚本内容为空或过长',
+    exec_failed: '执行失败（见 message）',
+  }
+  return typeof kind === 'string' ? map[kind] : undefined
 }
 
 /* ── 配置读写（官方 configForms） ─────────────────────────────────────── */
@@ -805,7 +826,9 @@ function buildOpsPanel(conn: any): HTMLElement {
   /* Tab 3：执行 */
   addTab('执行', (pane) => {
     const interpSelect = el('select', { style: INPUT_CSS + 'width:auto;' }) as HTMLSelectElement
-    for (const name of ['python', 'powershell', 'cmd', 'node']) {
+    // 与服务端默认白名单对齐（powershell/pwsh/cmd/bash/sh/python/python3/node）。
+    // 「探测环境」会再补充实际可用的解释器版本；这里给静态兜底，免得盲选。
+    for (const name of ['python', 'python3', 'bash', 'sh', 'powershell', 'pwsh', 'cmd', 'node']) {
       interpSelect.append(el('option', { value: name, textContent: name }))
     }
     const cwdInput = el('input', { type: 'text', style: INPUT_CSS + 'flex:1;', value: '/tmp', spellcheck: 'false' }) as HTMLInputElement
@@ -818,18 +841,66 @@ function buildOpsPanel(conn: any): HTMLElement {
       value: 'import os, platform\nprint(platform.platform())\nprint("cwd:", os.getcwd())',
     }) as HTMLTextAreaElement
     const runBtn = el('button', { type: 'button', textContent: '▶ 执行', style: BTN_PRIMARY_CSS }) as HTMLButtonElement
+    const probeEnvBtn = el('button', { type: 'button', textContent: '🔍 探测环境', style: BTN_CSS }) as HTMLButtonElement
     const out = el('pre', { style: PRE_CSS })
     pane.append(
       el('div', { style: 'display:flex;gap:6px;align-items:center;flex-wrap:wrap;' }, [
         el('label', { style: 'font-size:12px;', textContent: '解释器' }), interpSelect,
         el('label', { style: 'font-size:12px;', textContent: 'cwd' }), cwdInput,
         el('label', { style: 'font-size:12px;', textContent: '超时(s)' }), timeoutInput,
-        runBtn,
+        runBtn, probeEnvBtn,
       ]),
-      el('label', { style: HINT_CSS, textContent: '脚本（服务端有解释器白名单与危险命令黑名单；超时会 kill 进程树）。cwd 必须位于该 token 的沙箱根内。' }),
+      el('label', { style: HINT_CSS, textContent: '脚本（服务端有解释器白名单与危险命令黑名单；超时会 kill 进程树）。cwd 必须位于该 token 的沙箱根内。先用「探测环境」选对解释器，避免盲试。' }),
       scriptArea,
       out,
     )
+
+    /** 探测服务端环境：默认解释器、可用解释器及版本、白名单；据此预填下拉与 cwd。 */
+    probeEnvBtn.addEventListener('click', async () => {
+      setStatus(`探测 ${activeServer()} 运行环境…`)
+      probeEnvBtn.disabled = true
+      try {
+        const raw = (await callRpc(conn, 'server_info', { server: activeServer() })) as {
+          isError?: boolean
+          text?: string
+        }
+        out.textContent = typeof raw.text === 'string' ? raw.text : JSON.stringify(raw, null, 2)
+        if (raw.isError) {
+          setStatus('✘ 探测环境失败（见输出，可能缺少 exec 作用域）', true)
+          return
+        }
+        const info = toolData(raw) as {
+          os?: { os?: string; arch?: string; family?: string }
+          default_interpreter?: string
+          allowed_interpreters?: string[]
+          available_interpreters?: Array<{ name: string; version: string; python_major?: number }>
+        }
+        const avail = info.available_interpreters ?? []
+        // 把探测到的可用解释器同步进下拉（去重保留已有项）。
+        const have = new Set(Array.from(interpSelect.options).map((o) => o.value))
+        for (const a of avail) {
+          if (!have.has(a.name)) {
+            interpSelect.append(el('option', { value: a.name, textContent: a.name }))
+            have.add(a.name)
+          }
+        }
+        if (info.default_interpreter && have.has(info.default_interpreter)) {
+          interpSelect.value = info.default_interpreter
+        }
+        const osLine = info.os ? `${info.os.family ?? info.os.os ?? '?'} / ${info.os.arch ?? '?'}` : ''
+        const allow = Array.isArray(info.allowed_interpreters) ? info.allowed_interpreters.join(', ') : ''
+        const availLine = avail.length
+          ? avail.map((a) => `${a.name} ${a.version}${a.python_major !== undefined ? ` (py${a.python_major})` : ''}`).join('，')
+          : '(无可用解释器)'
+        setStatus(`✔ ${osLine}　默认解释器：${info.default_interpreter ?? '?'}　白名单：${allow}　可用：${availLine}`)
+      } catch (err) {
+        out.textContent = `✘ ${err instanceof Error ? err.message : String(err)}`
+        setStatus('✘ 探测环境失败', true)
+      } finally {
+        probeEnvBtn.disabled = false
+      }
+    })
+
     runBtn.addEventListener('click', async () => {
       const cwd = cwdInput.value.trim() || '/tmp'
       const timeout = Number.parseInt(timeoutInput.value, 10) || 30
@@ -842,11 +913,14 @@ function buildOpsPanel(conn: any): HTMLElement {
           interpreter: interpSelect.value,
           cwd,
           timeout_secs: timeout,
-        })) as { isError?: boolean; text?: string }
+        })) as { isError?: boolean; text?: string; errorKind?: string }
         const value = toolData(raw)
         out.textContent = typeof raw.text === 'string' ? raw.text : JSON.stringify(raw, null, 2)
-        if (raw.isError) setStatus('✘ 执行被服务端拒绝或失败（见输出）', true)
-        else if (value?.timed_out) setStatus(`⚠ 超时被 kill（生效超时 ${value?.timeout_secs}s）`, true)
+        if (raw.isError) {
+          const kind = raw.errorKind ?? value?.error_kind
+          const hint = errorKindHint(kind)
+          setStatus(`✘ 执行被拒绝或失败${hint ? `：${hint}` : ''}${kind ? `（${kind}）` : ''}`, true)
+        } else if (value?.timed_out) setStatus(`⚠ 超时被 kill（生效超时 ${value?.timeout_secs}s）`, true)
         else if (value?.exit_code !== 0) setStatus(`⚠ 退出码 ${value?.exit_code}（stderr 见输出）`, true)
         else setStatus(`✔ 执行成功，耗时 ${value?.duration_ms}ms`)
       } catch (err) {

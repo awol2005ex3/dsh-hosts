@@ -197,7 +197,7 @@ try {
   process.exit(1)
 }
 
-check('注册了 11 条 /api/host-mcp/* 路由', registeredRoutes.length === 11)
+check('注册了 12 条 /api/host-mcp/* 路由', registeredRoutes.length === 12)
 check('路由全部在 /api/host-mcp 下', registeredRoutes.every((r) => r.path.startsWith('/api/host-mcp/')))
 check('路由全部 POST + buffered', registeredRoutes.every((r) => r.methods.length === 1 && r.methods[0] === 'POST' && r.requestBody === 'buffered'))
 check('注册了 1 个 host-mcp 工具', registeredTools.length === 1 && registeredTools[0].name === 'host-mcp')

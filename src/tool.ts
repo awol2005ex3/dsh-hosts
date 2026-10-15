@@ -26,8 +26,24 @@ const ACTION_HINTS: Record<string, string> = {
   count_file_lines: '统计文件行数/字节数/修改时间，args:{path}（读大文件前先调用）',
   read_file_lines: '按行区间读文件，args:{path, start_line, end_line, with_line_numbers}',
   exec_script: '在服务器沙箱内执行脚本，args:{script, interpreter, cwd, timeout_secs}；interpreter 白名单见服务端配置',
+  server_info: '探测服务端运行环境：OS/架构、可用解释器及版本（含 Python 主版本）、解释器白名单与默认解释器，需 exec 作用域；执行 exec_script 前调用可选',
   diagnose: '一键排查：health + whoami + 系统信息探测（uname/负载/内存/磁盘/CPU 进程）',
   servers: '列出已配置服务器（不含 token）',
+}
+
+/** exec_script 失败时服务端结构化 error_kind → 可读提示（对应 host_server_mcp 的 classify_error）。 */
+const ERROR_KIND_HINTS: Record<string, string> = {
+  interpreter_not_allowed: '解释器不在白名单内（检查服务端 allowed_interpreters）',
+  interpreter_unsupported: '服务端不支持该解释器（内置支持 powershell/pwsh/cmd/bash/sh/python/python3/node）',
+  interpreter_not_found: '系统未安装该解释器或不在 PATH 中',
+  blocked: '脚本命中危险命令/交互式命令黑名单，被拒绝执行',
+  path_denied: '路径被拒绝：不在该 token 允许的沙箱根目录内',
+  path_not_found: '路径不存在或不可访问',
+  cwd_not_found: '工作目录不存在',
+  missing_cwd: '未指定 cwd 且服务端未配置 exec.default_cwd',
+  exec_disabled: '服务端已禁用脚本执行',
+  invalid_request: '脚本内容为空或过长',
+  exec_failed: '执行失败（见 message 详情）',
 }
 
 export function createHostMcpTool(dispatch: RpcDispatch) {
@@ -96,7 +112,12 @@ export function createHostMcpTool(dispatch: RpcDispatch) {
         if (json.length > OUTPUT_LIMIT) {
           json = `${json.slice(0, OUTPUT_LIMIT)}\n…[truncated ${json.length - OUTPUT_LIMIT} chars]`
         }
-        return { action, ok: true, result: json }
+        // exec_script 失败时把 error_kind 译成一行可读提示，方便模型纠正参数。
+        const decoded =
+          value && typeof value === 'object' && (value as Record<string, unknown>).errorKind
+            ? ` [${ERROR_KIND_HINTS[(value as Record<string, unknown>).errorKind as string] ?? (value as Record<string, unknown>).errorKind}]`
+            : ''
+        return { action, ok: true, result: json + decoded }
       } catch (err) {
         // 错误也走结构化返回（ok:false），模型能读到完整错误消息并自行纠正参数。
         return {
