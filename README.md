@@ -1,6 +1,6 @@
 # dsh-host-mcp
 
-DeepSeek Harness (dsh) 插件：连接装了 [host_server_mcp](../host_server_mcp) 的服务器，在 Web 设置页配置（IP/主机名 + 端口 + token），之后 **agent 对话里即可访问这些服务器排查问题**——查看信息、执行脚本、读文件、一键诊断。
+DeepSeek Harness (dsh) 插件：连接装了 [host_server_mcp](https://gitee.com/awol2010ex/host_server_mcp) 的服务器，在 Web 设置页配置（IP/主机名 + 端口 + token），之后 **agent 对话里即可访问这些服务器排查问题**——查看信息、执行脚本、读文件、一键诊断。
 
 ## 能力
 
