@@ -21,6 +21,12 @@ const check = (label, cond) => {
 /* ── 假的 host_server_mcp：SSE 帧 + Mcp-Session-Id 会话 ────────────────── */
 
 const SESSION_ID = 'fake-session-1'
+/** 已失效的会话 id（服务端已回收）：真机 rmcp 空闲 5 分钟销毁会话后即如此。 */
+const STALE_SESSION_ID = 'fake-session-stale'
+/** 当前服务端承认的会话 id 集合（可变，用于模拟会话被回收）。 */
+const liveSessions = new Set([SESSION_ID])
+/** true 时拒绝一切 initialize（模拟服务端异常/连接被破坏，无法建立新会话）。 */
+let rejectInitialize = false
 
 function sse(payload, id) {
   return `data: \nid: 0/${id}\nretry: 3000\n\ndata: ${JSON.stringify(payload)}\nid: 1/${id}\n\n`
@@ -50,14 +56,29 @@ const fakeServer = http.createServer((req, res) => {
     const sid = req.headers['mcp-session-id']
     // initialize 无需会话头（同真机）：先按方法分流。
     if (msg.method === 'initialize') {
+      if (rejectInitialize) {
+        res.writeHead(503, { 'content-type': 'text/plain' })
+        res.end('service unavailable')
+        return
+      }
+      // 新会话 id（每次 initialize 都换一个，模拟服务端轮换）
+      const fresh = `fake-session-${liveSessions.size + 2}`
+      liveSessions.add(fresh)
       res.writeHead(200, {
         'content-type': 'text/event-stream',
-        'mcp-session-id': SESSION_ID,
+        'mcp-session-id': fresh,
       })
       res.end(sse({
         jsonrpc: '2.0', id: msg.id,
         result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'host-server-mcp', version: '0.0.1' } },
       }, msg.id))
+      return
+    }
+    // 非 initialize 且带了一个服务端已不承认的会话 id → 404（同真机 rmcp）。
+    // 这是「MCP 访问时间久了报 Not Found: Session not found」的复现点。
+    if (sid && !liveSessions.has(sid)) {
+      res.writeHead(404, { 'content-type': 'text/plain' })
+      res.end('Not Found: Session not found')
       return
     }
     if (!sid) {
@@ -253,6 +274,40 @@ check('probe_uncached 缺主机名 → 明确报错', !probeUncachedBad.ok && /�
 const exec = await callRoute('exec_script', { server: 'fake', script: 'print(1)', interpreter: 'python' })
 check('exec_script 成功且解析 stdout', exec.ok && exec.value?.isError === false && exec.value?.text?.includes('ran: print(1)'))
 check('exec_script 注入默认超时', exec.value?.text?.includes('"timeout_secs": 10'))
+
+/* ── 会话回收回归（真机：访问久了报 Not Found: Session not found） ─────────
+ * rmcp 的 LocalSessionManager 默认空闲 5 分钟销毁会话，服务端重启同理。
+ * 服务端对「带已回收会话 id」的 POST 一律回 404。客户端必须：清缓存 → 重新
+ * initialize → 重试成功。若不清缓存，之后每次调用都复用死 id，永久 404。
+ */
+{
+  // 第一次调用建立会话并写入缓存。
+  const before = await callRoute('whoami', { server: 'fake' })
+  check('回收回归·首次调用成功', before.ok && before.value?.isError === false)
+
+  // 让服务端回收当前会话（等价于空闲超时 / 服务端重启）。
+  liveSessions.clear()
+
+  // 第二次调用：客户端带着已被回收的 id 去请求 → 收到 404 → 必须自愈。
+  const after = await callRoute('whoami', { server: 'fake' })
+  check('会话被服务端回收后自动重建并成功（404 自愈）',
+    after.ok && after.value?.isError === false && /whoami|token_id|scopes/.test(String(after.value?.text)))
+
+  // 第三次：自愈后的新会话必须真的落进缓存（否则每次都要 404→重建，浪费一次握手）。
+  const third = await callRoute('whoami', { server: 'fake' })
+  check('自愈后的会话被缓存（后续调用不再触发 404）', third.ok && third.value?.isError === false)
+
+  // 服务端持续不认任何会话、且拒绝新建（连接被中间层破坏/服务端异常）
+  // → 必须给出可读错误，而不是把裸的「Not Found: Session not found」抛给 agent。
+  liveSessions.clear()
+  rejectInitialize = true
+  const broken = await callRoute('whoami', { server: 'fake' })
+  check('会话始终无法建立 → 可读错误（非裸 404 文本）',
+    broken.ok === false && /会话失效|无法连接|请求失败/.test(String(broken.error?.message ?? '')))
+  rejectInitialize = false
+  const recovered = await callRoute('whoami', { server: 'fake' })
+  check('清理后可恢复', recovered.ok && recovered.value?.isError === false)
+}
 
 // 未知服务器 → 业务错误
 const missing = await callRoute('whoami', { server: 'nope' })

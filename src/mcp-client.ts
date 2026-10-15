@@ -7,6 +7,8 @@
  *   - 响应体是 SSE 帧（`data: <json>` 行），可能夹带 `id: 0` / `retry: 3000` 心跳；
  *   - `initialize` 成功后在响应头 `Mcp-Session-Id` 拿到会话 id，后续请求必须回传
  *     该头；否则工具调用返回 HTTP 422「Unexpected message, expect initialize request」；
+ *     回传了**已被服务端回收**的会话 id 则返回 HTTP 404「Not Found: Session not found」
+ *     （rmcp 的 LocalSessionManager 默认空闲 5 分钟即销毁会话，服务端重启同理）；
  *   - 无 id 的 JSON-RPC notification 返回 HTTP 202 空体（`notifications/initialized`）；
  *   - 工具结果在 `result.content[].text`（字符串，多半是 JSON），`result.isError`
  *     标记业务失败；未知工具是 JSON-RPC error -32602；
@@ -102,11 +104,20 @@ async function post(
   }
 }
 
-/** 初始化一个会话；返回会话 id。 */
+/** 语义上表示「会话已失效」的 HTTP 状态集合。 */
+const SESSION_INVALID_STATUS = new Set([404, 422])
+
+/**
+ * 初始化一个会话；返回会话 id。
+ *
+ * `forceNew` 为 true 时先丢弃旧会话 id（上一次调用确认它已失效）。
+ * 由 callTool 的 `forceNewSession` 转换而来。
+ */
 export async function initSession(
   server: HostServer,
-  opts: { timeoutMs: number; signal?: AbortSignal },
+  opts: { timeoutMs: number; signal?: AbortSignal; forceNew?: boolean },
 ): Promise<InitResult> {
+  if (opts.forceNew) sessionCache.delete(server.id)
   let resp
   try {
     resp = await post(
@@ -155,7 +166,10 @@ export async function notifyInitialized(
   opts: { timeoutMs: number; sessionId: string; signal?: AbortSignal },
 ): Promise<void> {
   try {
-    await post(server, { jsonrpc: '2.0', method: 'notifications/initialized' }, opts)
+    const resp = await post(server, { jsonrpc: '2.0', method: 'notifications/initialized' }, opts)
+    // 服务端已不认这个会话：清缓存，让下一次调用重新 initialize。
+    // （真机上这条通知几乎总被忽略，但清一下缓存零成本。）
+    if (SESSION_INVALID_STATUS.has(resp.httpStatus)) sessionCache.delete(server.id)
   } catch {
     // 通知失败不致命：部分服务端不严格校验 initialized 通知。
   }
@@ -165,7 +179,11 @@ export async function notifyInitialized(
  * 调用一个 MCP 工具。
  *
  * 会话策略：优先用缓存会话；`initialize` 后补发 initialized 通知。若请求因会话
- * 失效返回 422（或传输异常），丢弃缓存会话重试一次（重新 initialize）。
+ * 失效返回 404（服务端已回收该会话，如 rmcp 空闲 5 分钟销毁）或 422（没带
+ * 会话头），丢弃缓存会话重试一次（重新 initialize）。
+ *
+ * 关键：**任何一次失败都必须让缓存里的会话 id 失效**。否则缓存会一直持有那个
+ * 已被服务端回收的 id，后续每次调用都复用 → 稳定复现 404，直到进程重启。
  */
 export async function callTool(
   server: HostServer,
@@ -175,7 +193,7 @@ export async function callTool(
 ): Promise<McpCallResult> {
   let sessionId = opts.forceNewSession ? undefined : sessionCache.get(server.id)
   if (!sessionId) {
-    const init = await initSession(server, opts)
+    const init = await initSession(server, { ...opts, forceNew: opts.forceNewSession === true })
     if (init.error) {
       return { ok: false, error: `无法连接 MCP 端点：${init.error}` }
     }
@@ -202,10 +220,21 @@ export async function callTool(
     return { ok: false, error: `请求失败：${message}` }
   }
 
-  // 会话失效：清缓存后强制重新初始化重试一次。
-  if (resp.httpStatus === 422 && !opts.forceNewSession) {
+  // 会话失效（404 已被服务端回收 / 422 缺会话头）：清缓存后强制重新初始化重试一次。
+  if (SESSION_INVALID_STATUS.has(resp.httpStatus) && !opts.forceNewSession) {
     sessionCache.delete(server.id)
     return callTool(server, name, args, { ...opts, forceNewSession: true })
+  }
+
+  // 重试后仍拿不到有效会话：给一条能自解释的消息（用户最容易在这一步懵）。
+  if (SESSION_INVALID_STATUS.has(resp.httpStatus)) {
+    return {
+      ok: false,
+      httpStatus: resp.httpStatus,
+      error: resp.httpStatus === 404
+        ? 'MCP 会话失效（服务端已回收该会话，重新初始化后仍未恢复）。请重试；若持续失败，检查 host_server_mcp 是否被重启或空闲超过会话上限。'
+        : resp.text.trim() || `HTTP ${resp.httpStatus}`,
+    }
   }
 
   if (resp.httpStatus !== 200) {
