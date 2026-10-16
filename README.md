@@ -6,9 +6,9 @@ DeepSeek Harness (dsh) 插件：连接装了 [host_server_mcp](https://gitee.com
 
 | 通道 | 能力 |
 |------|------|
-| **设置 → 插件 → 服务器** | 增删改服务器（host/port/token/mcpPath/备注）、设默认、保存前逐台测试连通性 |
-| **agent 工具 `host-mcp`** | `probe`（连通诊断）、`diagnose`（一键排查）、`whoami`、`list_files`、`count_file_lines`、`read_file_lines`、`exec_script`、`health`、`servers` |
-| **侧边栏「服务器」按钮** | 浮动运维面板：概览 / 文件浏览 / 脚本执行三个页签 |
+| **设置 → 插件 → 服务器** | 增删改服务器（host/port/token/mcpPath/备注）、设默认、行内「测试连接」（保存前预检，不依赖已落盘配置） |
+| **agent 工具 `host-mcp`** | `probe`（连通诊断）、`diagnose`（一键排查）、`whoami`、`list_files`、`count_file_lines`、`read_file_lines`、`exec_script`、`server_info`（服务端环境）、`health`、`servers`、`version`、`probe_uncached`（配置页预检） |
+| **侧边栏「服务器」按钮** | 浮动运维面板：概览 / 文件 / 执行 三个页签 |
 
 ## 安装
 
@@ -68,11 +68,14 @@ host-mcp(action, args?, server?)
 | `diagnose` | — | **一键排查**：health + whoami + 系统探测（uname/负载/内存/磁盘/CPU 进程） |
 | `whoami` | — | token 身份、作用域（read/exec）、可访问根目录、限流与超时上限 |
 | `list_files` | `{path, pattern, recursive, max_entries}` | 列目录（glob + 递归） |
-| `count_file_lines` | `{path}` | 行数/字节数/是否二进制（读大文件前先调用） |
+| `count_file_lines` | `{path}` | 行数/字节数/修改时间（读大文件前先调用） |
 | `read_file_lines` | `{path, start_line, end_line, with_line_numbers}` | 按行区间读文件 |
-| `exec_script` | `{script, interpreter, cwd, timeout_secs}` | 在服务器沙箱内执行脚本 |
+| `exec_script` | `{script, interpreter, cwd, timeout_secs}` | 在服务器沙箱内执行脚本（失败回 `error_kind` 结构化分类，如解释器未授权、命令被拦截等） |
+| `server_info` | — | 服务端运行环境：OS/架构、可用解释器及版本、白名单与默认解释器（需 exec 作用域；`exec_script` 前可先调用选解释器） |
+| `probe_uncached` | `{host, port, token, mcpPath}` | 探测**尚未保存**的服务器定义（配置页「测试连接」专用；回包只给阶段结论与修复提示，不回显 token） |
 | `health` | — | `GET /health` |
 | `servers` | — | 已配置服务器清单（**不含 token**） |
+| `version` | — | 插件名称与版本 |
 
 对话示例：
 
@@ -92,7 +95,7 @@ agent 会调 `host-mcp(action:"diagnose", server:"bd-pr-rn1")`，一次拿到服
   ├─ RPC 分发器（rpc.ts）：现读配置 → pickServer → MCP 客户端
   ├─ MCP Streamable HTTP 客户端（mcp-client.ts）：
   │    initialize（拿 Mcp-Session-Id）→ notifications/initialized → tools/call
-  │    SSE 帧解析、会话缓存、422 自动重初始化、401 可读报错
+  │    SSE 帧解析、会话缓存、422/404 会话失效自动重建（服务端空闲回收或重启后自愈）、401 可读报错
   └─ agent 工具（tool.ts）：万能 host-mcp 工具，复用同一条分发路径
 ```
 
@@ -107,8 +110,10 @@ agent 会调 `host-mcp(action:"diagnose", server:"bd-pr-rn1")`，一次拿到服
 ```bash
 npm install
 npm run build          # tsc + wrap-client
-npm run check          # 冒烟（假 ctx + 假 MCP 服务器）+ 依赖解析
+npm run check          # 冒烟 + 依赖解析 + cordis 服务访问 + 配置解析（离线可跑）
 npm run check:resolve  # 只跑依赖解析（从 profile 的 node_modules 出发）
+npm run check:cordis   # 真 cordis 验证 ctx.inject 跨 fiber 读服务
+npm run check:parse    # 配置解析链路（含 role(secret) 回归）
 npm run check:live     # 真机联调（需要 HSM_HOST/HSM_PORT/HSM_TOKEN）
 ```
 
@@ -121,6 +126,7 @@ HSM_HOST=bd-pr-rn1 HSM_PORT=8765 HSM_TOKEN=hsk_xxx npm run check:live
 ## 已知限制
 
 - `read_file_lines` 是 host_server_mcp 里唯一返回**原始文本**（非 JSON 信封）的工具，面板已特判；
+- MCP 会话有服务端生命周期：rmcp 的 LocalSessionManager 默认空闲 5 分钟即销毁会话（服务重启同理），之后带旧会话 id 的请求会得到 404。客户端会自动「清缓存 → 重新 initialize → 重试一次」自愈，调用方无感——长时间空闲后的第一次调用会多一次握手；
 - `diagnose` 的系统探测用 `interpreter: python`（跨平台最稳），需要服务器白名单里有 python；
 - 管理 API（`/admin/tokens` 签发/吊销）未接入面板，请用 host_server_mcp 自带的管理接口。
 
