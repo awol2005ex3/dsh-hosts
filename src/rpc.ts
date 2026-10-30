@@ -39,6 +39,7 @@ export const RPC_ENDPOINTS = [
   'version',
   'servers',
   'probe',
+  'probe_all',
   'health',
   'whoami',
   'list_files',
@@ -239,6 +240,40 @@ function createHandler(settingsRef: () => HostMcpSettings & { serverError?: stri
         const picked = pickServer(settings, args, false)
         if (picked.error || !picked.server) return failure(new Error(picked.error ?? '无服务器'))
         return probeServer(picked.server, settings, signal)
+      }
+
+      case 'probe_all': {
+        if (!Array.isArray(settings.servers) || settings.servers.length === 0) {
+          return ok({
+            ok: true,
+            summary: '未配置任何服务器',
+            results: [],
+          })
+        }
+        const results: Array<Record<string, unknown>> = []
+        await Promise.allSettled(
+          settings.servers.map(async (server) => {
+            try {
+              const res = await probeServer(server, settings, signal)
+              if (res.ok && res.value && typeof res.value === 'object') {
+                results.push({ serverId: server.id, ...(res.value as Record<string, unknown>) })
+              } else if (res.ok) {
+                results.push({ serverId: server.id, ok: true, value: res.value })
+              } else {
+                results.push({ serverId: server.id, ok: false, error: res.error })
+              }
+            } catch (err) {
+              results.push({ serverId: server.id, ok: false, error: err instanceof Error ? err.message : String(err) })
+            }
+          }),
+        )
+        const failed = results.filter((r) => r.ok === false).length
+        const total = results.length
+        return ok({
+          ok: failed === 0,
+          summary: failed === 0 ? `全部 ${total} 台服务器可用` : `${failed}/${total} 台服务器异常`,
+          results,
+        })
       }
 
       /**

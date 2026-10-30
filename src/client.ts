@@ -674,10 +674,11 @@ function buildOpsPanel(conn: any): HTMLElement {
   /* Tab 1：概览（probe + health + whoami） */
   addTab('概览', (pane) => {
     const probeBtn = el('button', { type: 'button', textContent: '连接诊断（probe）', style: BTN_PRIMARY_CSS }) as HTMLButtonElement
+    const probeAllBtn = el('button', { type: 'button', textContent: '一键刷新全部', style: BTN_CSS }) as HTMLButtonElement
     const diagBtn = el('button', { type: 'button', textContent: '一键排查（diagnose）', style: BTN_CSS }) as HTMLButtonElement
     const out = el('pre', { style: PRE_CSS })
     pane.append(
-      el('div', { style: 'display:flex;gap:8px;' }, [probeBtn, diagBtn]),
+      el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;' }, [probeBtn, probeAllBtn, diagBtn]),
       out,
     )
     probeBtn.addEventListener('click', async () => {
@@ -688,6 +689,19 @@ function buildOpsPanel(conn: any): HTMLElement {
         setStatus(value.ok === false ? `✘ ${value.summary ?? '连接异常'}` : `✔ ${value.summary ?? '连接正常'}`, value.ok === false)
       } catch (err) {
         setStatus(`✘ ${err instanceof Error ? err.message : String(err)}`, true)
+      }
+    })
+    probeAllBtn.addEventListener('click', async () => {
+      setStatus('一键刷新全部服务器可用性…')
+      probeAllBtn.disabled = true
+      try {
+        const value = (await callRpc(conn, 'probe_all', {})) as Record<string, any>
+        out.textContent = JSON.stringify(value, null, 2)
+        setStatus(value.ok === false ? `✘ ${value.summary ?? '部分服务器异常'}` : `✔ ${value.summary ?? '全部可用'}`, value.ok === false)
+      } catch (err) {
+        setStatus(`✘ ${err instanceof Error ? err.message : String(err)}`, true)
+      } finally {
+        probeAllBtn.disabled = false
       }
     })
     diagBtn.addEventListener('click', async () => {

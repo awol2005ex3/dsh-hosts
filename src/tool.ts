@@ -55,6 +55,7 @@ export function createHostMcpTool(dispatch: RpcDispatch) {
       'Pass `action` (one of: ' + RPC_ENDPOINTS.join(', ') + ') and `args` matching it.',
       'Omitting `server` uses the plugin default server; pass `server` to pick another.',
       ACTION_HINTS.probe,
+      ACTION_HINTS.probe_all,
       ACTION_HINTS.diagnose,
       'Examples: {action:"probe"} · {action:"exec_script",args:{script:"uname -a",cwd:"/tmp"}} ·',
       '{action:"read_file_lines",args:{path:"/tmp/nohup.out",start_line:1,end_line:50}} ·',
